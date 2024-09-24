@@ -42,7 +42,7 @@ func main() {
 
 	helpStr := "Images to Video\n" +
 		"Dependencies: imageMagick, poppler, ffmpeg\n" +
-		"Usage: itv [flags] [path_to_pdf]\n" +
+		"Usage: ptv [flags] [path_to_pdf]\n" +
 		"    -h                        : help\n" +
 		"    -r <int> <int>            : set output resolution, default: 1920 1080\n" +
 		"    -s <float>                : duration for each page to be displayed in seconds, default: 6.0\n" +
@@ -207,7 +207,7 @@ func imagesToVideoSequence(dir string, fps int, secondsPerPage float64, res []in
 
 	// scale images
 	scaleRatio := float64(res[1]) / float64(img.Bounds().Dx())
-	scaleImages(files, dir, scaleRatio) // !!! ??? gets error when scaling images FIX THIS SOME HOW
+	scaleImages(files, dir, scaleRatio)
 
 	// duplicated frames for the given fps + secondsPerPage
 	count := 0
@@ -294,7 +294,7 @@ func imagesToVideoScroll(dir string, fps int, secondsPerPage float64, res []int,
 	fmt.Println("Total frames (approximation):", frameCount)
 
 	// calculate pixelsTranslated per draw
-	pixelsTranslated = (longImg.Bounds().Dy() + (viewportHeight * len(files))) / (frameCount) // FIX THIS PLEASE, use vh / vw ratio
+	pixelsTranslated = (longImg.Bounds().Dy() + (2 * viewportHeight)) / (frameCount)
 	fmt.Println("Pixels translated per frame:", pixelsTranslated)
 
 	fmt.Println("Creating video frames...")
@@ -396,11 +396,6 @@ func getExportName(count int, fileExtension string) string {
 
 func scaleImages(files []fs.DirEntry, dir string, scaleRatio float64) {
 	scalePercentage := strconv.FormatFloat(scaleRatio*100.0, 'f', 4, 64) + "%"
-
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		fmt.Println("Scaling: Error: reading PDF directory.", err)
-	}
 
 	fmt.Println("Scalling images...")
 	// scalles all images in the directory

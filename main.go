@@ -34,19 +34,21 @@ func main() {
 
 	var resolution []int = []int{1920, 1080}
 	var fps int = 30
-	var secondsPerPage int = 6
+	var secondsPerPage float64 = 6
 	var videoFormat string = ""
 	var pdfPath string = ""
 	var keepContents bool = false
+	var animationStyle string = ""
 
 	helpStr := "Images to Video\n" +
 		"Dependencies: imageMagick, poppler, ffmpeg\n" +
 		"Usage: itv [flags] [path_to_pdf]\n" +
 		"    -h                        : help\n" +
-		"    -r <int> <int>            : defins output resolution -> [width] [height]\n" +
-		"    -s <int>                  : duration for each page to be displayed for in seconds\n" +
+		"    -r <int> <int>            : set output resolution, default: 1920 1080\n" +
+		"    -s <float>                : duration for each page to be displayed in seconds, default: 6.0\n" +
+		"    -fps <int>                : sets fps, default: 30\n" +
+		"    -style <string>           : animates the frames in image 'sequence' or 'scroll' style\n" +
 		"    -keep                     : don't delete pdf contents directory after encoding video\n" +
-		"    -fps <int>                : sets fps\n" +
 		"    -avi                      : exports to .avi\n" +
 		"    -mov                      : exports to .mov\n" +
 		"    -mp4                      : exports to .mp4"
@@ -86,12 +88,19 @@ func main() {
 			fps = fps_
 		} else if args[i] == "-s" {
 			i++
-			secondsPerPage_, err := strconv.Atoi(args[i])
+			secondsPerPage_, err := strconv.ParseFloat(args[i], 64)
 			if err != nil {
 				fmt.Println("Error parsing seconds:", err)
 				return
 			}
 			secondsPerPage = secondsPerPage_
+		} else if args[i] == "-style" {
+			i++
+			if args[i] != "scroll" && args[i] != "sequence" {
+				fmt.Println("Error: animation style not valid. Use either 'scroll' or 'sequence'")
+				return
+			}
+			animationStyle = args[i]
 		} else if args[i] == "-keep" {
 			keepContents = true
 		} else if args[i] == "-avi" || args[i] == "-mov" || args[i] == "-mp4" {
@@ -121,6 +130,7 @@ func main() {
 		}
 	}
 
+	// argument checks
 	if pdfPath == "" {
 		fmt.Println("Error: PDF path not stated. Use -h for help")
 		return
@@ -129,11 +139,22 @@ func main() {
 		fmt.Println("Error: No video format to export to. Use -h for help")
 		return
 	}
+	if animationStyle != "scroll" && animationStyle != "sequence" {
+		fmt.Println("Error: animation style not defined. -h for help")
+		return
+	}
 
-	imagesDir := pdfToImages(pdfPath, resolution)
+	// convert the pdf pages to images
+	imagesDir := pdfToImages(pdfPath)
 
-	imagesToVideo(imagesDir, fps, secondsPerPage, resolution, videoFormat)
+	// convert pdf to a video
+	if animationStyle == "scroll" {
+		imagesToVideoScroll(imagesDir, fps, secondsPerPage, resolution, videoFormat)
+	} else if animationStyle == "sequence" {
+		imagesToVideoSequence(imagesDir, fps, secondsPerPage, resolution, videoFormat)
+	}
 
+	// keep or remove the content generated from the pdf
 	if !keepContents {
 		err := os.RemoveAll(imagesDir)
 		if err != nil {
@@ -148,7 +169,7 @@ func main() {
 	fmt.Println("This is PDF to Video")
 }
 
-func pdfToImages(pdfPath string, res []int) string {
+func pdfToImages(pdfPath string) string {
 
 	pdfDir := makePDFDir(pdfPath)
 
@@ -174,19 +195,68 @@ func pdfToImages(pdfPath string, res []int) string {
 		fmt.Println("Error converting pdf to images:", err)
 	}
 
-	files := getImageDirEntrys(pdfDir)
-	img := openImage(pdfDir + files[0].Name())
-
 	// scale factor so image fits inside viewport
-	scalePercentage := float64(res[0]) / float64(img.Bounds().Dx())
-
-	// Open scaled images
-	scaleImages(files, pdfDir, scalePercentage)
-
 	return pdfDir
 }
 
-func imagesToVideo(dir string, fps int, secondsPerPage int, res []int, vf string) {
+func imagesToVideoSequence(dir string, fps int, secondsPerPage float64, res []int, vf string) {
+	var framesDir string = makeFramesDir(dir)
+
+	files := getImageDirEntrys(dir)
+	img := openImage(dir + files[0].Name())
+
+	// scale images
+	scaleRatio := float64(res[1]) / float64(img.Bounds().Dx())
+	scaleImages(files, dir, scaleRatio) // !!! ??? gets error when scaling images FIX THIS SOME HOW
+
+	// duplicated frames for the given fps + secondsPerPage
+	count := 0
+	for _, file := range files {
+		imgName := file.Name()
+		for i := 0; i < int(float64(fps)*secondsPerPage); i++ {
+
+			var arguments []string = []string{
+				dir + imgName,
+				framesDir + getExportName(count, ".jpg"),
+			}
+
+			result := exec.Command("cp", arguments...)
+			_, err := result.Output()
+			if err != nil {
+				fmt.Println("Error creating frame in sequence.", err)
+			}
+
+			count++
+		}
+	}
+
+	// encode to video
+	videoPath := strings.TrimSuffix(dir, "_pdf/")
+	fmt.Println("Video Path:", videoPath)
+	fmt.Println("Encoding frames into ." + vf + " file.")
+	// convert image sequence to a video
+	// ffmpeg -f image2 -framerate 12 -i ./%04d.jpg -s 1920x1080 e.mp4
+	// The syntax foo-%03d.jpeg specifies to use a decimal number composed of three digits padded with zeroes to express the sequence number.
+	var arguments []string = []string{
+		"-f",
+		"image2",
+		"-framerate",
+		strconv.Itoa(fps),
+		"-i",
+		framesDir + "%05d.jpg",
+		"-s",
+		strconv.Itoa(res[0]) + "x" + strconv.Itoa(res[1]),
+		videoPath + "." + vf,
+	}
+	cmdResult := exec.Command("ffmpeg", arguments...)
+	_, err := cmdResult.Output()
+	if err != nil {
+		fmt.Println("Error converting images to video:", err)
+		return
+	}
+}
+
+func imagesToVideoScroll(dir string, fps int, secondsPerPage float64, res []int, vf string) {
 	var pixelsTranslated int
 	var framesDir string = makeFramesDir(dir)
 	var frameCount int
@@ -195,33 +265,39 @@ func imagesToVideo(dir string, fps int, secondsPerPage int, res []int, vf string
 	var viewportHeight int = res[1]
 	viewport := image.NewRGBA(image.Rect(0, 0, viewportWidth, viewportHeight))
 
-	// image entrys
 	files := getImageDirEntrys(dir)
 	img := openImage(dir + files[0].Name())
 
+	// scale images based on animation style
+	scaleRatio := float64(res[0]) / float64(img.Bounds().Dx())
+	scaleImages(files, dir, scaleRatio)
+
+	// get files based on them being scaled
+	sFiles := getImageDirEntrys(dir)
+	sImg := openImage(dir + sFiles[0].Name())
+
 	// creates longImg
-	imgHeight := img.Bounds().Dy()
-	longImg := image.NewRGBA(image.Rect(0, 0, viewportWidth, imgHeight*len(files)))
+	longImg := image.NewRGBA(image.Rect(0, 0, viewportWidth, sImg.Bounds().Max.Y*len(files)))
 
 	// adds image data to longImg
-	sPoint := image.Pt(0, 0)
+	nextPoint := image.Pt(0, 0)
 	for i := 0; i < len(files); i++ {
-		sImg := openImage(dir + files[i].Name())
+		nextImg := openImage(dir + files[i].Name())
 
-		draw.Draw(longImg, longImg.Rect, sImg, sPoint, draw.Src)
+		draw.Draw(longImg, longImg.Rect, nextImg, nextPoint, draw.Src)
 
-		sPoint.Y -= imgHeight
+		nextPoint.Y -= nextImg.Bounds().Max.Y
 	}
 
 	// frames of the video
-	frameCount = fps * secondsPerPage * len(files) // also FIX This
+	frameCount = int(float64(fps) * secondsPerPage * float64(len(files)))
 	fmt.Println("Total frames (approximation):", frameCount)
 
 	// calculate pixelsTranslated per draw
 	pixelsTranslated = (longImg.Bounds().Dy() + (viewportHeight * len(files))) / (frameCount) // FIX THIS PLEASE, use vh / vw ratio
 	fmt.Println("Pixels translated per frame:", pixelsTranslated)
 
-	fmt.Println("Creating video frames.")
+	fmt.Println("Creating video frames...")
 	// animates longImg on viewport
 	for posY, count := -viewportHeight, 0; posY <= longImg.Bounds().Dy()+pixelsTranslated; posY += pixelsTranslated {
 		// scaled image draw location in viewport
@@ -261,8 +337,6 @@ func imagesToVideo(dir string, fps int, secondsPerPage int, res []int, vf string
 	}
 
 }
-
-// FUNCTIONS
 
 func saveJPEG(img image.Image, fileName string) error {
 	f, err := os.Create(fileName)
@@ -320,29 +394,34 @@ func getExportName(count int, fileExtension string) string {
 	return result
 }
 
-func scaleImages(files []fs.DirEntry, dir string, scalePct float64) {
-	scalePctFormated := strconv.FormatFloat(scalePct*100.0, 'f', 4, 64) + "%"
+func scaleImages(files []fs.DirEntry, dir string, scaleRatio float64) {
+	scalePercentage := strconv.FormatFloat(scaleRatio*100.0, 'f', 4, 64) + "%"
 
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Println("Scaling: Error: reading PDF directory.", err)
+	}
+
+	fmt.Println("Scalling images...")
+	// scalles all images in the directory
 	for i := 0; i < len(files); i++ {
 		filePath := dir + files[i].Name()
 
 		var arguments []string = []string{
 			filePath,
 			"-resize",
-			scalePctFormated,
+			scalePercentage,
 			filePath,
 		}
-
 		// cmd to scale image
 		cmdResult := exec.Command("magick", arguments...)
 		_, err := cmdResult.Output()
 		if err != nil {
 			fmt.Println("Error resizing image:", err)
 		}
-		// fmt.Println("output: ", output)
 	}
 
-	fmt.Println("Scaled all images successfully.")
+	fmt.Println("Scaled images.")
 }
 
 func makePDFDir(pdfPath string) string {

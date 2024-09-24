@@ -19,30 +19,39 @@ import (
 // 3. translate single image across the viewport
 //
 // 4. translate two images to seamlessly animate across the viewport
-// USE GO RUTINES !!!
+// 41. I just made a really large image and traslated that
 //
 // 5. animate all images across the viewport
 //
 // 6. export the image sequence as an mp4
+//
+// 7. Add ability to select between png and jpeg
+//
+// 8. Add ability to use the poppler to convert a pdf all the way to a mp4
 
 func main() {
-
 	args := os.Args
 
-	var directory string
 	var resolution []int = []int{1920, 1080}
 	var fps int = 30
 	var secondsPerPage int = 6
+	var videoFormat string = ""
+	var pdfPath string = ""
+	var keepContents bool = false
 
 	helpStr := "Images to Video\n" +
-		"itv [options] [path_to_dir]\n" +
+		"Dependencies: imageMagick, poppler, ffmpeg\n" +
+		"Usage: itv [flags] [path_to_pdf]\n" +
+		"    -h                        : help\n" +
 		"    -r <int> <int>            : defins output resolution -> [width] [height]\n" +
-		"    -fps <int>                : sets fps\n" +
 		"    -s <int>                  : duration for each page to be displayed for in seconds\n" +
-		"    -h                        : help"
+		"    -keep                     : don't delete pdf contents directory after encoding video\n" +
+		"    -fps <int>                : sets fps\n" +
+		"    -avi                      : exports to .avi\n" +
+		"    -mov                      : exports to .mov\n" +
+		"    -mp4                      : exports to .mp4"
 
 	// CLI
-
 	if len(args) == 1 {
 		fmt.Println(helpStr)
 		return
@@ -70,46 +79,117 @@ func main() {
 		} else if args[i] == "-fps" {
 			i++
 			fps_, err := strconv.Atoi(args[i])
-			fps = fps_
 			if err != nil {
 				fmt.Println("Error parsing fps value: ", err)
 				return
 			}
-		} else if strings.Contains(args[i], "/") {
-			directory_ := args[i]
-			directory = directory_
-			if directory[len(directory)-1] != '/' {
-				fmt.Println("Error: not a directory.")
+			fps = fps_
+		} else if args[i] == "-s" {
+			i++
+			secondsPerPage_, err := strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Println("Error parsing seconds:", err)
 				return
 			}
-			_, err := os.Stat(directory)
+			secondsPerPage = secondsPerPage_
+		} else if args[i] == "-keep" {
+			keepContents = true
+		} else if args[i] == "-avi" || args[i] == "-mov" || args[i] == "-mp4" {
+			videoFormat = strings.TrimPrefix(args[i], "-")
+		} else if strings.Contains(args[i], "/") {
+			pdfPath_ := args[i]
+			if strings.LastIndex(pdfPath_, ".pdf") != len(pdfPath_)-4 {
+				fmt.Println("Error: not a PDF file.", pdfPath_)
+				return
+			}
+			_, err := os.Stat(pdfPath_)
 			if err != nil {
 				if os.IsNotExist(err) {
-					fmt.Println("Directory does not exist.")
+					fmt.Println("PDF path dosen't exist:", pdfPath_)
 					return
 				} else {
-					fmt.Println("Error checking directory:", err)
+					fmt.Println("Error checking PDF path:", err)
 					return
 				}
 			} else {
-				fmt.Println("Source directory exists:", directory)
+				fmt.Println("PDF path exists:", pdfPath_)
 			}
+			pdfPath = pdfPath_
 		} else {
 			fmt.Println("Invalid argument:", args[i])
 			return
 		}
 	}
 
-	imagesToVideo(directory, fps, secondsPerPage, resolution)
+	if pdfPath == "" {
+		fmt.Println("Error: PDF path not stated. Use -h for help")
+		return
+	}
+	if videoFormat == "" {
+		fmt.Println("Error: No video format to export to. Use -h for help")
+		return
+	}
 
-	fmt.Println("This is Image to Video")
+	imagesDir := pdfToImages(pdfPath, resolution)
+
+	imagesToVideo(imagesDir, fps, secondsPerPage, resolution, videoFormat)
+
+	if !keepContents {
+		err := os.RemoveAll(imagesDir)
+		if err != nil {
+			fmt.Println("Error deleting PDF directory:", err)
+		} else {
+			fmt.Println("Directory containing PDF contents has been deleted.", imagesDir)
+		}
+	} else {
+		fmt.Println("Keeped directory containing PDF contents.", imagesDir)
+	}
+
+	fmt.Println("This is PDF to Video")
 }
 
-func imagesToVideo(dir string, fps int, secondsPerPage int, res []int) {
+func pdfToImages(pdfPath string, res []int) string {
 
+	pdfDir := makePDFDir(pdfPath)
+
+	var args []string = []string{
+		"-progress",
+		"-aa",
+		"yes",
+		"-aaVector",
+		"yes",
+		"-jpeg",
+		"-r",
+		"150",
+		"-sep",
+		"0",
+		pdfPath,
+		pdfDir,
+	}
+
+	result := exec.Command("pdftoppm", args...)
+	output, err := result.Output()
+	if err != nil {
+		fmt.Println("Output:", output)
+		fmt.Println("Error converting pdf to images:", err)
+	}
+
+	files := getImageDirEntrys(pdfDir)
+	img := openImage(pdfDir + files[0].Name())
+
+	// scale factor so image fits inside viewport
+	scalePercentage := float64(res[0]) / float64(img.Bounds().Dx())
+
+	// Open scaled images
+	scaleImages(files, pdfDir, scalePercentage)
+
+	return pdfDir
+}
+
+func imagesToVideo(dir string, fps int, secondsPerPage int, res []int, vf string) {
 	var pixelsTranslated int
-	var scaledDir string = dir + "scaled/"
-	var exportDir string = dir + "export/"
+	var framesDir string = makeFramesDir(dir)
+	var frameCount int
 	// create viewport
 	var viewportWidth int = res[0]
 	var viewportHeight int = res[1]
@@ -119,50 +199,29 @@ func imagesToVideo(dir string, fps int, secondsPerPage int, res []int) {
 	files := getImageDirEntrys(dir)
 	img := openImage(dir + files[0].Name())
 
-	// scale factor so image fits inside viewport
-	scalePercentage := float64(viewportWidth) / float64(img.Bounds().Dx())
-
-	// Open scaled images
-	scaledFiles := scaleImages(files, dir, scaledDir, scalePercentage)
-	scaledImg := openImage(scaledDir + scaledFiles[0].Name())
-
-	// checks if image scalled correctly
-	if scaledImg.Bounds().Dx() == viewportWidth {
-		fmt.Println("Images scaled correctly")
-		// fmt.Println(scaledImg.Bounds().Dx())
-	} else {
-		fmt.Println("Images didn't scale correctly")
-	}
-
 	// creates longImg
-	sImgHeight := scaledImg.Bounds().Dy()
-	longImg := image.NewRGBA(image.Rect(0, 0, viewportWidth, sImgHeight*len(scaledFiles)))
+	imgHeight := img.Bounds().Dy()
+	longImg := image.NewRGBA(image.Rect(0, 0, viewportWidth, imgHeight*len(files)))
 
 	// adds image data to longImg
 	sPoint := image.Pt(0, 0)
-	for i := 0; i < len(scaledFiles); i++ {
-		sImg := openImage(scaledDir + scaledFiles[i].Name())
+	for i := 0; i < len(files); i++ {
+		sImg := openImage(dir + files[i].Name())
 
 		draw.Draw(longImg, longImg.Rect, sImg, sPoint, draw.Src)
 
-		sPoint.Y -= sImgHeight
+		sPoint.Y -= imgHeight
 	}
-	// saveJPEG(longImg, "long.jpg")
+
+	// frames of the video
+	frameCount = fps * secondsPerPage * len(files) // also FIX This
+	fmt.Println("Total frames (approximation):", frameCount)
 
 	// calculate pixelsTranslated per draw
-	pixelsTranslated = (sImgHeight + viewportHeight) / (fps * secondsPerPage)
+	pixelsTranslated = (longImg.Bounds().Dy() + (viewportHeight * len(files))) / (frameCount) // FIX THIS PLEASE, use vh / vw ratio
+	fmt.Println("Pixels translated per frame:", pixelsTranslated)
 
-	err := os.Mkdir(exportDir, 0755)
-	if err != nil {
-		if os.IsExist(err) {
-			fmt.Println("Export directory exists:", exportDir)
-		} else {
-			fmt.Println("Export directory dose not exist:", err)
-		}
-	} else {
-		fmt.Println("Created export directory:", exportDir)
-	}
-
+	fmt.Println("Creating video frames.")
 	// animates longImg on viewport
 	for posY, count := -viewportHeight, 0; posY <= longImg.Bounds().Dy()+pixelsTranslated; posY += pixelsTranslated {
 		// scaled image draw location in viewport
@@ -170,13 +229,37 @@ func imagesToVideo(dir string, fps int, secondsPerPage int, res []int) {
 
 		// draws and saves frame
 		draw.Draw(viewport, viewport.Bounds(), longImg, point, draw.Src)
-		saveJPEG(viewport, exportDir+getExportName(count, ".jpg"))
+		saveJPEG(viewport, framesDir+getExportName(count, ".jpg"))
 
 		// reset viewport
 		draw.Draw(viewport, viewport.Bounds(), image.Black, image.Pt(0, 0), draw.Src)
 
 		count++
 	}
+
+	videoPath := strings.TrimSuffix(dir, "_pdf/")
+	fmt.Println("Encoding frames into ." + vf + " file.")
+	// convert image sequence to a video
+	// ffmpeg -f image2 -framerate 12 -i ./%04d.jpg -s 1920x1080 e.mp4
+	// The syntax foo-%03d.jpeg specifies to use a decimal number composed of three digits padded with zeroes to express the sequence number.
+	var arguments []string = []string{
+		"-f",
+		"image2",
+		"-framerate",
+		strconv.Itoa(fps),
+		"-i",
+		framesDir + "%05d.jpg",
+		"-s",
+		strconv.Itoa(res[0]) + "x" + strconv.Itoa(res[1]),
+		videoPath + "." + vf,
+	}
+	cmdResult := exec.Command("ffmpeg", arguments...)
+	_, err := cmdResult.Output()
+	if err != nil {
+		fmt.Println("Error converting sequence to video:", err)
+		return
+	}
+
 }
 
 // FUNCTIONS
@@ -193,13 +276,16 @@ func saveJPEG(img image.Image, fileName string) error {
 }
 
 func getImageDirEntrys(dir string) []fs.DirEntry {
-	files, err := os.ReadDir(dir)
+	content, err := os.ReadDir(dir)
+	var files []fs.DirEntry
 	if err != nil {
 		fmt.Println("Error reading directory:", err)
 	}
-	// for _, file := range files {
-	// 	fmt.Println(file.Name())
-	// }
+	for i := 0; i < len(content); i++ {
+		if strings.Index(content[i].Name(), ".") != -1 {
+			files = append(files, content[i])
+		}
+	}
 	return files
 }
 
@@ -219,10 +305,12 @@ func getExportName(count int, fileExtension string) string {
 	var result string
 
 	if count < 10 {
-		result = "000" + strconv.Itoa(count)
+		result = "0000" + strconv.Itoa(count)
 	} else if count < 100 {
-		result = "00" + strconv.Itoa(count)
+		result = "000" + strconv.Itoa(count)
 	} else if count < 1000 {
+		result = "00" + strconv.Itoa(count)
+	} else if count < 10000 {
 		result = "0" + strconv.Itoa(count)
 	} else {
 		result = strconv.Itoa(count)
@@ -232,30 +320,21 @@ func getExportName(count int, fileExtension string) string {
 	return result
 }
 
-func scaleImages(files []fs.DirEntry, dir string, scaledDir string, scalePct float64) []fs.DirEntry {
-	err := os.Mkdir(scaledDir, 0775)
-	if err != nil {
-		if os.IsExist(err) {
-			fmt.Println("Scaled directory exists:", scaledDir)
-			return getImageDirEntrys(scaledDir)
-		} else {
-			fmt.Println("Error making scalded directory:", err)
-		}
-	} else {
-		fmt.Println("Created scaled directory:", scaledDir)
-	}
-
+func scaleImages(files []fs.DirEntry, dir string, scalePct float64) {
 	scalePctFormated := strconv.FormatFloat(scalePct*100.0, 'f', 4, 64) + "%"
 
 	for i := 0; i < len(files); i++ {
-		curFilePath := dir + files[i].Name()
-		index := strings.LastIndex(files[i].Name(), "/") + 1
-		newFilePath := scaledDir + files[i].Name()[index:]
-		fmt.Println(curFilePath)
-		fmt.Println(newFilePath)
+		filePath := dir + files[i].Name()
+
+		var arguments []string = []string{
+			filePath,
+			"-resize",
+			scalePctFormated,
+			filePath,
+		}
 
 		// cmd to scale image
-		cmdResult := exec.Command("magick", curFilePath, "-resize", scalePctFormated, newFilePath)
+		cmdResult := exec.Command("magick", arguments...)
 		_, err := cmdResult.Output()
 		if err != nil {
 			fmt.Println("Error resizing image:", err)
@@ -263,5 +342,40 @@ func scaleImages(files []fs.DirEntry, dir string, scaledDir string, scalePct flo
 		// fmt.Println("output: ", output)
 	}
 
-	return getImageDirEntrys(scaledDir)
+	fmt.Println("Scaled all images successfully.")
+}
+
+func makePDFDir(pdfPath string) string {
+	pdfDir := strings.TrimSuffix(pdfPath, ".pdf")
+	pdfDir += "_pdf/"
+
+	err := os.Mkdir(pdfDir, 0755)
+	if err != nil {
+		if os.IsExist(err) {
+			fmt.Println("PDF directory already exists:", pdfDir)
+		} else {
+			fmt.Println("Error making PDF directory:", err)
+		}
+	} else {
+		fmt.Println("Created directory for PDF contents:", pdfDir)
+	}
+
+	return pdfDir
+}
+
+func makeFramesDir(dir string) string {
+	framesDir := dir + "frames/"
+
+	err := os.Mkdir(framesDir, 0755)
+	if err != nil {
+		if os.IsExist(err) {
+			fmt.Println("Frames directory already exists:", framesDir)
+		} else {
+			fmt.Println("Error making frames directory:", err)
+		}
+	} else {
+		fmt.Println("Created directory for video frames:", framesDir)
+	}
+
+	return framesDir
 }
